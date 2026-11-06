@@ -1,0 +1,155 @@
+name: umi GPU userspace (iPadOS 17 / arm64)
+
+# Builds the owner-signed Adreno Metal plugin, the Turnip library and the GPU addon with the official UniXNU scripts, on a macOS
+# runner (they need `xcrun --sdk iphoneos`, meson, glslang and cargo; none of that exists on Linux). Nothing in this workflow
+# reads a secret, an IPSW, a Data seed or any Apple trust file: the artifacts are the ad-hoc signed plugin bundle, the probe
+# daemon and plist, trust.json (the CDHashes) and the addon file. The owner trust bundle is made locally afterwards with
+# scripts/make-owner-trust-bundle.py from trust.json and the local original trust bundle.
+#
+# Run it in a private repository, once with stage=toolchain (reports tools and SDK, builds nothing), then stage=build.
+# Delete the run after downloading the artifacts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "toolchain: report tools only; build: full build"
+        type: choice
+        options: ["toolchain", "build"]
+        default: "toolchain"
+      unixnu_ref:
+        description: "UniXNU commit (the umi build pin)"
+        required: true
+        default: "c740efb5b23e94453bb179f7801eb592baafacf6"
+      xcode:
+        description: "Xcode version of the macos-26 image (/Applications/Xcode_<version>.app)"
+        required: true
+        default: "26.6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: umi-gpu-userspace
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 240
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
+    steps:
+      - name: Check out UniXNU at the pin
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: ${{ inputs.unixnu_ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install host tools
+        run: |
+          brew install glslang bison llvm lld pkgconf rustup
+          {
+            echo "/opt/homebrew/opt/bison/bin"
+            echo "/opt/homebrew/opt/llvm/bin"
+            echo "$HOME/.cargo/bin"
+          } >> "$GITHUB_PATH"
+          # The image already has rustup (the log said so); there is no rustup-init to call. Find the binary instead of assuming a path.
+          RUSTUP=$(command -v rustup || true)
+          [ -n "$RUSTUP" ] || RUSTUP="$(brew --prefix rustup)/bin/rustup"
+          [ -x "$RUSTUP" ] || { echo "no rustup binary found"; ls -l "$(brew --prefix rustup)/bin" || true; exit 1; }
+          echo "rustup: $RUSTUP"
+          "$RUSTUP" toolchain install 1.98.0 --profile minimal
+          "$RUSTUP" target add aarch64-apple-ios --toolchain 1.98.0
+          # `cargo +1.98.0` needs rustup's cargo proxy on PATH ahead of any other cargo.
+          dirname "$RUSTUP" >> "$GITHUB_PATH"
+
+      - name: Report the toolchain
+        run: |
+          set -x
+          sw_vers; uname -m
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-path
+          bison --version | head -n 1
+          glslangValidator --version | head -n 2
+          cargo +1.98.0 --version
+          rustup +1.98.0 target list --installed
+          python3 --version
+          df -h "$GITHUB_WORKSPACE"
+          missing=0
+          for tool in git make clang cmake ninja bison glslangValidator cargo codesign; do
+            command -v "$tool" >/dev/null || { echo "MISSING $tool"; missing=1; }
+          done
+          exit "$missing"
+
+      - name: Fetch the pinned sources and set up Python
+        if: inputs.stage == 'build'
+        run: |
+          # The same preparation as build_plugin() in scripts/build-boot-runtime.py: the pinned Mesa and translator checkouts,
+          # the recorded Mesa patches, the Python venv. The module name has a hyphen, so it is loaded by path.
+          python3 - <<'PY'
+          import importlib.util, json, subprocess, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('boot_runtime', 'scripts/build-boot-runtime.py')
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          root = m.ROOT
+          pins = json.loads((root / 'scripts/data/adreno-compiler-inputs.json').read_text())
+          mesa = root / '.cache/mesa-work'
+          if m.checkout(mesa, pins['mesa']):
+              for patch in pins['patches']:
+                  m.run('git', '-C', mesa, 'apply', root / patch)
+          m.validate_recorded_patches(root, mesa, pins)
+          translator = json.loads((root / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())['translator']
+          m.checkout(root / '.cache/gpu-reference/metal2vulkan', translator)
+          venv = root / '.cache/mesa-venv'
+          if not (venv / 'bin/python').is_file():
+              m.run(sys.executable, '-m', 'venv', venv)
+          m.run(venv / 'bin/python', '-m', 'pip', 'install', '-r', root / 'scripts/requirements-adreno-compiler.txt')
+          PY
+
+      - name: Build Turnip (ios)
+        if: inputs.stage == 'build'
+        run: python3 scripts/build-turnip-darwin.py --target ios
+
+      - name: Build the Metal plugin and probe daemon (ios)
+        if: inputs.stage == 'build'
+        run: python3 scripts/build-adreno-metal-plugin.py --target ios --no-replay
+
+      - name: Pack the GPU addon
+        if: inputs.stage == 'build'
+        run: |
+          # With the probe daemon: the owner trust module needs its CDHash too (make-owner-trust-bundle.py).
+          python3 scripts/make-gpu-addon.py --publish build/gpuaddon.bin
+          ls -l build/gpuaddon.bin build/adreno-metal-plugin
+          cat build/adreno-metal-plugin/trust.json
+          shasum -a 256 build/gpuaddon.bin
+
+      - name: Artifacts
+        if: inputs.stage == 'build'
+        uses: actions/upload-artifact@v4
+        with:
+          name: umi-gpu-userspace-ios17
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            build/gpuaddon.bin
+            build/adreno-metal-plugin/trust.json
+            build/adreno-metal-plugin/NativeAdrenoMetal.bundle
+            build/adreno-metal-plugin/*.plist
+            build/adreno-metal-plugin/adrenoprobed
+            build/mesa-tu-ios/**/*.dylib
