@@ -56,6 +56,16 @@ jobs:
           ref: ${{ inputs.unixnu_ref }}
           persist-credentials: false
 
+      - name: Check out the three submodules the GPU build uses
+        run: |
+          # drivers/Adreno740 (the kernel/user ABI header Turnip is built against), drivers/AdrenoMetal (the plugin source) and
+          # kits/AdrenoPM4 are submodules of UniXNU; the others are not needed here and are not fetched.
+          git submodule update --init --depth 1 drivers/Adreno740 drivers/AdrenoMetal kits/AdrenoPM4
+          git submodule status drivers/Adreno740 drivers/AdrenoMetal kits/AdrenoPM4
+          test -f drivers/Adreno740/NativeAdrenoABI.h
+          test -f drivers/AdrenoMetal/NativeAdrenoMetalPlugin.mm
+          test -f kits/AdrenoPM4/AdrenoPM4.c
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
