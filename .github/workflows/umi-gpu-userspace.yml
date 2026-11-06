@@ -110,6 +110,19 @@ jobs:
           root = m.ROOT
           pins = json.loads((root / 'scripts/data/adreno-compiler-inputs.json').read_text())
           mesa = root / '.cache/mesa-work'
+          # turnip-frame-diagnostics.patch creates a file with `--- /dev/null` but no `new file mode` line, which git (2.43 and
+          # the runner's 2.56 alike) refuses with "dev/null: No such file or directory". The upstream patch is identical in
+          # UniXNU main, so the line is added here, in this runner's checkout only; the patch files are not hashed anywhere
+          # (the Turnip build hashes the patched Mesa tree), and the same fixed file serves the reverse check of
+          # validate_recorded_patches.
+          import re
+          for patch in pins['patches']:
+              path = root / patch
+              text = path.read_text()
+              fixed = re.sub(r'^(diff --git a/(\S+) b/\2)\n(--- /dev/null)$', r'\1\nnew file mode 100644\n\3', text, flags=re.M)
+              if fixed != text:
+                  print('added new file mode to', patch)
+                  path.write_text(fixed)
           if m.checkout(mesa, pins['mesa']):
               for patch in pins['patches']:
                   m.run('git', '-C', mesa, 'apply', root / patch)
