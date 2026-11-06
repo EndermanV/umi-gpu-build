@@ -72,7 +72,7 @@ jobs:
 
       - name: Install host tools
         run: |
-          brew install glslang bison llvm lld pkgconf rustup
+          brew install glslang shaderc spirv-tools bison llvm lld pkgconf rustup
           {
             echo "/opt/homebrew/opt/bison/bin"
             echo "/opt/homebrew/opt/llvm/bin"
@@ -102,7 +102,7 @@ jobs:
           python3 --version
           df -h "$GITHUB_WORKSPACE"
           missing=0
-          for tool in git make clang cmake ninja bison glslangValidator cargo codesign; do
+          for tool in git make clang cmake ninja bison glslangValidator glslc cargo codesign; do
             command -v "$tool" >/dev/null || { echo "MISSING $tool"; missing=1; }
           done
           exit "$missing"
