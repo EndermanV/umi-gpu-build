@@ -58,10 +58,11 @@ jobs:
 
       - name: Check out the three submodules the GPU build uses
         run: |
-          # drivers/Adreno740 (the kernel/user ABI header Turnip is built against), drivers/AdrenoMetal (the plugin source) and
-          # kits/AdrenoPM4 are submodules of UniXNU; the others are not needed here and are not fetched.
-          git submodule update --init --depth 1 drivers/Adreno740 drivers/AdrenoMetal kits/AdrenoPM4
-          git submodule status drivers/Adreno740 drivers/AdrenoMetal kits/AdrenoPM4
+          # drivers/Adreno740 (the kernel/user ABI header Turnip is built against), drivers/AdrenoMetal (the plugin source),
+          # drivers/GopFramebuffer (the plugin includes ../GopFramebuffer/NativeGOPWire.h) and kits/AdrenoPM4 are submodules of UniXNU; the others are not needed here and are not fetched.
+          git submodule update --init --depth 1 drivers/Adreno740 drivers/AdrenoMetal drivers/GopFramebuffer kits/AdrenoPM4
+          git submodule status drivers/Adreno740 drivers/AdrenoMetal drivers/GopFramebuffer kits/AdrenoPM4
+          test -f drivers/GopFramebuffer/NativeGOPWire.h
           test -f drivers/Adreno740/NativeAdrenoABI.h
           test -f drivers/AdrenoMetal/NativeAdrenoMetalPlugin.mm
           test -f kits/AdrenoPM4/AdrenoPM4.c
