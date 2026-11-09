@@ -1,0 +1,41 @@
+{
+  "name": "umi owner launchd cache (21H461)",
+  "on": {
+    "workflow_dispatch": {}
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "jobs": {
+    "build": {
+      "runs-on": "macos-26",
+      "timeout-minutes": 25,
+      "env": {
+        "DEVELOPER_DIR": "/Applications/Xcode_26.6.app/Contents/Developer"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "repository": "UniXNU/UniXNU",
+            "ref": "d3de950a23a54d454d6ac21d8deceaa3f4ad0e73",
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Fetch original OS from Apple;merge only owner job;sign cache",
+          "run": "python3 - <<'PY'\nfrom pathlib import Path\nimport hashlib, importlib.util, json, plistlib, subprocess, sys\nfrom types import SimpleNamespace\nsys.path.insert(0, 'scripts')\nfrom unixnu.ipsw import Ipsw\nroot=Path.cwd()\nspec=importlib.util.spec_from_file_location('runtime',root/'scripts/build-boot-runtime.py')\nm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\nassert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()=='d3de950a23a54d454d6ac21d8deceaa3f4ad0e73'\nconfig=dict(product='iPad7,1',version='17.7.11',build='21H461',device_class='j120ap',chip_id=0x8011,board_id=12)\nctx=SimpleNamespace(board={'ipsw':config},out_root=root/'build/cache-input')\nurl='https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw'\nipsw=Ipsw(ctx,url)\nos_image=ipsw.extract('OS')\nout=root/'build/umi-owner-cache';out.mkdir(parents=True)\nwork=root/'build/os-inspect';work.mkdir()\ndaemons=out/'daemons';daemons.mkdir()\nlabel='org.unixnu.umi.adrenoprobed'\njob=dict(Label=label,ProgramArguments=['/private/var/ngpu/bin/adrenoprobed'],RunAtLoad=True,KeepAlive=False,StandardErrorPath='/dev/null',ThrottleInterval=30,UserName='root')\n(daemons/(label+'.plist')).write_bytes(plistlib.dumps(job))\nwith m.os_mount(os_image,work) as mount:\n source=mount/'System/Library/xpc/launchd.plist'\n assert hashlib.sha256(source.read_bytes()).hexdigest()=='f1b99c4e3e738cb1c2622ad82f5e78cd2fbd1f88c8ced13c423aabf91b2b22eb'\n original=plistlib.loads(source.read_bytes())\n assert len(original['LaunchDaemons'])==561\n cache=out/'xpc/launchd.plist'\n report=m.merge_launchd_cache(source,daemons,cache)\n merged=plistlib.loads(cache.read_bytes())\n assert len(merged['LaunchDaemons'])==562\n assert all(merged[k]==v for k,v in original.items() if k!='LaunchDaemons')\n assert all(merged['LaunchDaemons'][k]==v for k,v in original['LaunchDaemons'].items())\n assert set(merged['LaunchDaemons'])-set(original['LaunchDaemons'])=={'/System/Library/LaunchDaemons/'+label+'.plist'}\n report.update(m.sign_launchd_cache(cache))\n report.update(pin='d3de950a23a54d454d6ac21d8deceaa3f4ad0e73',target='iPad7,1/21H461',source_url=url,member=ipsw.member('OS'),original_jobs=561,merged_jobs=562,original_entries_unchanged=True,owner_job=job,private_inputs_uploaded=False,hardware_verified=False)\n (out/'cache-build.json').write_text(json.dumps(report,indent=2)+'\\n')\nfiles={str(p.relative_to(out)):hashlib.sha256(p.read_bytes()).hexdigest() for p in out.rglob('*') if p.is_file()}\n(out/'files-sha256.json').write_text(json.dumps(files,indent=2)+'\\n')\nprint(json.dumps(report,indent=2))\nPY\n"
+        },
+        {
+          "uses": "actions/upload-artifact@v4",
+          "with": {
+            "name": "umi-owner-cache-21H461",
+            "retention-days": 1,
+            "if-no-files-found": "error",
+            "path": "build/umi-owner-cache/"
+          }
+        }
+      ]
+    }
+  }
+}
