@@ -1,0 +1,47 @@
+{
+  "name": "umi GPU Mach probe (ios17 arm64)",
+  "on": {
+    "workflow_dispatch": {}
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "jobs": {
+    "build": {
+      "runs-on": "macos-26",
+      "timeout-minutes": 20,
+      "env": {
+        "DEVELOPER_DIR": "/Applications/Xcode_26.6.app/Contents/Developer",
+        "HOMEBREW_NO_AUTO_UPDATE": "1",
+        "HOMEBREW_NO_INSTALL_CLEANUP": "1"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "repository": "UniXNU/UniXNU",
+            "ref": "d3de950a23a54d454d6ac21d8deceaa3f4ad0e73",
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Pinned headers and shader tools",
+          "run": "git submodule update --init --depth 1 drivers/AdrenoMetal drivers/Adreno740 kits/AdrenoPM4\nbrew install shaderc spirv-tools\nxcodebuild -version\nxcrun --sdk iphoneos --show-sdk-version"
+        },
+        {
+          "name": "Build and sign bounded owner Mach probe",
+          "run": "python3 - <<'PY'\nfrom pathlib import Path\nimport hashlib, importlib.util, json, plistlib, re, shutil, struct, subprocess\nroot=Path.cwd()\nspec=importlib.util.spec_from_file_location('runtime',root/'scripts/build-boot-runtime.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\npins=json.loads((root/'scripts/data/adreno-compiler-inputs.json').read_text())['mesa']\nm.checkout(root/'.cache/mesa-work',{**pins,'sparse_directories':['include']})\nsubprocess.run(['python3','scripts/gen-turnip-smoke-shaders.py'],check=True)\nassert not (root/'build/turnip-smoke/TurnipReplay.h').exists()\nout=root/'build/umi-mach-probe';out.mkdir(parents=True)\nsource=root/'drivers/AdrenoMetal'\noriginal_cpp=(source/'NativeAdrenoProbeDaemon.cpp').read_text();cpp=original_cpp.replace('matching(\"IOAcceleratorES\")','matching(\"NativeAdrenoGpuPublished\")')\nassert cpp!=original_cpp\ncpp=cpp.replace('i < 240','i < 120')\nold='const int status = !port ? 3 : adrenoUserTest(port, \"adrenoprobed\") >= 0 ? 0 : 4;'\nassert cpp.count(old)==1\ncpp=cpp.replace(old,'int status = !port ? 3 : 0;\\n    for (unsigned round = 0; port && round < 2; ++round) {\\n        if (adrenoUserTest(port, round ? \"umiMach2\" : \"umiMach1\") != 4) {status = 4; break;}\\n    }')\nassert cpp.count('    nativeOsLogExport();')==1\ncpp=cpp.replace('    nativeOsLogExport();','')\nheader=(source/'NativeAdrenoUserTest.h').read_text()\nold='    close(gpu.conn);\\n#ifdef NATIVE_TURNIP_REPLAY'\nassert header.count(old)==1\nheader=header.replace(old,'    const int closeStatus = close(gpu.conn);\\n#ifdef NATIVE_TURNIP_REPLAY')\nat=header.rfind('    return verified;');assert at>header.index('static int adrenoUserTest(')\nheader=header[:at]+header[at:].replace('    return verified;','    return (verified == 4 && verifiedWc == 4 && !error && !errorWc && replayed && !closeStatus) ? 4 : -1;',1)\n(out/'NativeAdrenoProbeDaemon.cpp').write_text(cpp);(out/'NativeAdrenoUserTest.h').write_text(header)\nsdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],text=True).strip()\nbase=['-target','arm64-apple-ios17.0','-isysroot',sdk,'-O2','-g','-Wall','-Wextra','-Werror','-fstack-protector-strong']\npm4=out/'AdrenoPM4.o'\nsubprocess.run(['xcrun','clang',*base,'-std=c11','-c','kits/AdrenoPM4/AdrenoPM4.c','-o',pm4],check=True)\ndaemon=out/'adrenoprobed'\nsubprocess.run(['xcrun','clang++',*base,'-std=c++17','-I','drivers/AdrenoMetal','-I','drivers/Adreno740','-I','kits/AdrenoPM4','-I','.cache/mesa-work/include','-I','build/turnip-smoke',out/'NativeAdrenoProbeDaemon.cpp',pm4,'-o',daemon],check=True)\nent={'com.apple.private.security.no-container':True,'com.apple.security.iokit-user-client-class':['AGXDeviceUserClient']}\n(out/'entitlements.plist').write_bytes(plistlib.dumps(ent))\nsubprocess.run(['codesign','--force','--sign','-','--pagesize','4096','--identifier','org.blu-sharky.umi-mach-probe','--entitlements',out/'entitlements.plist',daemon],check=True)\nsubprocess.run(['codesign','--verify','--strict',daemon],check=True)\nactual=plistlib.loads(subprocess.check_output(['codesign','-d','--entitlements',':-',daemon],stderr=subprocess.DEVNULL));assert actual==ent\ninfo=subprocess.run(['codesign','--display','--verbose=4',daemon],check=True,capture_output=True,text=True).stderr\nassert re.search(r'^Page size=4096$',info,re.M)\ncdhash=re.search(r'^CDHash=([0-9a-f]{40})$',info,re.M)[1]\nmagic,cpu,subtype,kind=struct.unpack_from('<4I',daemon.read_bytes());assert (magic,cpu,subtype,kind)==(0xfeedfacf,0x100000c,0,2)\nfiles={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in out.iterdir() if p.is_file()}\nreceipt=dict(unixnu_pin=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),target='arm64-apple-ios17.0',service='NativeAdrenoGpuPublished',rounds=2,open_type='0x4147',cache_modes=['0x101','0x401'],daemon_cdhash=cdhash,signed_entitlements=actual,files_sha256=files,scope='Owner job only;no stock-job aliases;no Metal publish;two upstream ABI tests with exact success/close gating;no oslog export;no dylib next to daemon so Turnip phase stays off',hardware_verified=False)\n(out/'probe-build.json').write_text(json.dumps(receipt,indent=2)+'\\n')\nprint(json.dumps(receipt,indent=2))\n\nPY\n"
+        },
+        {
+          "uses": "actions/upload-artifact@v4",
+          "with": {
+            "name": "umi-mach-probe-ios17",
+            "retention-days": 1,
+            "if-no-files-found": "error",
+            "path": "build/umi-mach-probe/"
+          }
+        }
+      ]
+    }
+  }
+}
